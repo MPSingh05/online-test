@@ -54,7 +54,7 @@ async function api(path, { method = 'GET', body } = {}) {
   try {
     res = await fetch(path, init);
   } catch {
-    throw new ApiError('Cannot reach the server. Check that it is running and try again.', 0);
+    throw new ApiError('Cannot connect. Check your internet connection and try again.', 0);
   }
   const data = await res.json().catch(() => ({}));
   // The session ended (signed out elsewhere, expired, or the user was disabled): back to the sign-in page.
@@ -993,10 +993,12 @@ async function viewStart(ctx, testId) {
     </ul>
     <details class="sections-detail" style="margin-top:16px">
       <summary>Sections in this test (${test.sections.length})</summary>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="stack-table">
         <thead><tr><th>Section</th><th>Document</th><th class="num">Questions</th></tr></thead>
         <tbody>${test.sections
-          .map((s) => `<tr><td>${esc(s.sectionTitle)}</td><td>${esc(s.docName)}</td><td class="num">${s.generated}</td></tr>`)
+          .map(
+            (s) => `<tr><td class="title-cell"><strong>${esc(s.sectionTitle)}</strong></td><td data-label="Document">${esc(s.docName)}</td><td class="num" data-label="Questions">${s.generated}</td></tr>`,
+          )
           .join('')}</tbody>
       </table></div>
     </details>
@@ -1053,7 +1055,7 @@ async function viewAttempt(ctx, attemptId) {
 
   app.innerHTML = `<div class="attempt">
     <div class="attempt-bar">
-      <div class="title-wrap"><p class="eyebrow">${esc([data.user.name, data.user.email || data.user.mobile].join(' · '))}</p><h1 class="attempt-title">${esc(data.test.title)}</h1></div>
+      <div class="title-wrap"><p class="eyebrow">${esc(data.user.name)}<span class="eyebrow-extra"> · ${esc(data.user.email || data.user.mobile)}</span></p><h1 class="attempt-title">${esc(data.test.title)}</h1></div>
       <div class="timer" id="timer" role="timer" aria-label="Time remaining">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>
         <span id="timer-text">--:--</span>
@@ -1218,9 +1220,14 @@ async function viewAttempt(ctx, attemptId) {
     if (left <= 0) submit({ auto: true });
   }
   const interval = setInterval(tick, 1000);
+  // While a test runs, phones hide the tab bar so the question gets the whole screen.
+  document.body.classList.add('focus-mode');
+  renderInstallBanner();
   ctx.onCleanup(() => {
     clearInterval(interval);
     clearTimeout(saveTimer);
+    document.body.classList.remove('focus-mode');
+    renderInstallBanner();
   });
 
   async function submit({ auto = false } = {}) {
@@ -1306,14 +1313,14 @@ async function viewResult(ctx, attemptId) {
     </div>
     <section class="card">
       <h2>Section-wise performance</h2>
-      <div class="table-wrap"><table>
+      <div class="table-wrap"><table class="stack-table">
         <thead><tr><th>Section</th><th class="num">Questions</th><th class="num">Correct</th><th class="num">Wrong</th><th class="num">Unanswered</th><th>Score</th></tr></thead>
         <tbody>${r.bySection
           .map(
             (s) => `<tr>
-              <td><div class="section-title">${esc(s.sectionTitle)}</div><div class="muted small">${esc(s.docName)}</div></td>
-              <td class="num">${s.total}</td><td class="num">${s.correct}</td><td class="num">${s.wrong}</td><td class="num">${s.unanswered}</td>
-              <td><span class="small">${s.percentage}%</span><div class="bar"><span style="width:${s.percentage}%"></span></div></td>
+              <td class="title-cell"><div class="section-title">${esc(s.sectionTitle)}</div><div class="muted small">${esc(s.docName)}</div></td>
+              <td class="num" data-label="Questions">${s.total}</td><td class="num" data-label="Correct">${s.correct}</td><td class="num" data-label="Wrong">${s.wrong}</td><td class="num" data-label="Unanswered">${s.unanswered}</td>
+              <td data-label="Score"><span class="small">${s.percentage}%</span><div class="bar"><span style="width:${s.percentage}%"></span></div></td>
             </tr>`,
           )
           .join('')}</tbody>
@@ -2097,10 +2104,72 @@ async function viewUsers(ctx) {
   render();
 }
 
+// ---------- installing the app ----------
+// Android and desktop Chrome/Edge offer an install prompt the page can trigger. Safari on iPhone and iPad
+// has none: people install from the Share menu, so they get a short hint instead.
+
+let installPrompt = null;
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIosSafari = () =>
+  (/iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) &&
+  !/crios|fxios|edgios/i.test(navigator.userAgent);
+
+function renderInstallBanner() {
+  const el = document.getElementById('install-banner');
+  const dismissed = storage.get('opt.installDismissed', false);
+  const ios = isIosSafari();
+  if (isStandalone() || dismissed || (!installPrompt && !ios) || document.body.classList.contains('focus-mode')) {
+    el.hidden = true;
+    return;
+  }
+  const shareGlyph = '<svg class="share-glyph" viewBox="0 0 24 24" aria-label="Share"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M6 11v9h12v-9"/></svg>';
+  el.hidden = false;
+  el.innerHTML = `<div class="install-banner" role="region" aria-label="Install the app">
+    <img class="install-icon" src="icons/icon-192.png" alt="">
+    <p>${
+      installPrompt
+        ? '<strong>Install the app</strong> for quick, full-screen access from your home screen.'
+        : `<strong>Install the app:</strong> tap ${shareGlyph} Share, then <strong>Add to Home Screen</strong>.`
+    }</p>
+    ${installPrompt ? '<button class="btn primary small" type="button" data-action="install">Install</button>' : ''}
+    <button class="btn ghost small" type="button" data-action="dismiss" aria-label="Dismiss">✕</button>
+  </div>`;
+  el.querySelector('[data-action="install"]')?.addEventListener('click', async () => {
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    renderInstallBanner();
+  });
+  el.querySelector('[data-action="dismiss"]').addEventListener('click', () => {
+    storage.set('opt.installDismissed', true);
+    renderInstallBanner();
+  });
+}
+
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault(); // shown in our own banner instead of the browser's mini-bar
+  installPrompt = event;
+  renderInstallBanner();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  renderInstallBanner();
+  toast('App installed');
+});
+
+// The service worker keeps the app's own files available offline and makes it installable. It only works
+// over https (or on localhost).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {
+    // Not available here (for example plain http on a network address); the site still works.
+  });
+}
+
 // ---------- start ----------
 
 async function start() {
   window.addEventListener('hashchange', router);
+  renderInstallBanner();
   try {
     const { user, notice } = await api('/api/auth/me');
     if (user) signedIn(user);

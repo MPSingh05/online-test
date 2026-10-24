@@ -16,6 +16,8 @@ An online practice-test portal with invite-only access. An administrator uploads
 - **User management**: the administrator's **Users** page lists everyone with their invite and sign-in status, and can send or resend invites, edit details, and enable or disable a user at any time. Disabling signs the user out straight away. The administrator can also open any user's reports.
 - **Timed tests**: a countdown with 5-minute and 1-minute warnings, a question palette (answered, not answered, marked for review), and automatic submission at zero. Answers are saved as you go, so a reload or closed tab can be resumed. An attempt left open past its deadline is graded on its saved answers.
 - **Results**: score, pass/fail, correct, wrong and unanswered counts, time taken, a section-wise breakdown, and an answer review that can be filtered by correct, wrong or unanswered. Each question shows your answer, the correct answer, an explanation and the supporting quote from the document.
+- **Phones, tablets and desktops**: the layout adapts to every screen. On phones, navigation moves to a tab bar along the bottom and the header scrolls away; during a test, the tab bar is hidden so the question gets the whole screen. Forms use 16px text so iPhones don't zoom in, and controls are finger-sized on touch screens.
+- **Installable app**: the portal installs on Android, iPhone, iPad and desktop like an app, with its own icon, a full-screen window and a startup screen. See [Installing the app](#installing-the-app).
 - **Reports**: every test the signed-in user has taken, with its course, score and result, average and best scores, pass count, links to each result, and a Resume button for tests still in progress. Each user sees only their own tests and results.
 
 ## Question generation
@@ -75,6 +77,18 @@ npm test       # unit tests (parsing, sections, question papers, question checks
 
 `test/jutroQuestionBank.test.js` checks the question-paper reader against a real 29-page, 111-question paper with its answer key at the end. It verifies all 111 answers, the four sections and clean question text, and grades against the stored key. The PDF goes in `test/fixtures/jutro-question-bank.pdf`, and the expected answer key, section titles and sample question text go in `test/fixtures/jutro-expected.json`. Both are git-ignored because they are exam material; without them, these tests are skipped.
 
+### Installing the app
+
+The portal is a Progressive Web App: people install it from the browser, with no app store. The installed app opens full-screen from its own icon, shows a startup screen, and always loads the latest version from the server. Without a connection it still opens, and asks the user to reconnect.
+
+- **Android** (Chrome, Edge, Samsung Internet): an **Install the app** banner appears in the portal; or use the browser menu, **Install app**.
+- **iPhone and iPad** (Safari): the portal shows how. Tap **Share**, then **Add to Home Screen**.
+- **Desktop** (Chrome, Edge): an install button appears in the banner and in the address bar.
+
+Installing needs the portal to be served over **https**. Browsers allow it on `http://localhost` only, so a phone opening `http://192.168.x.x:3000` can use the site but not install it. Deploy the portal behind https (and set `APP_URL` to that address), or try it from a phone through an https tunnel such as Cloudflare Tunnel or ngrok.
+
+To publish it in **Google Play** or the **App Store**, wrap the deployed https site: for example with [PWABuilder](https://www.pwabuilder.com/), which packages a PWA for both stores. This needs a Google Play developer account, and an Apple developer account plus a Mac to build the iOS app.
+
 ### Settings (`.env`)
 
 | Variable | Default | Purpose |
@@ -99,6 +113,8 @@ npm test       # unit tests (parsing, sections, question papers, question checks
 
 ```
 public/            Single-page front end (plain HTML, CSS and JavaScript; no build step)
+public/manifest.webmanifest, sw.js   App manifest and service worker that make the portal installable
+public/icons/, public/splash/        App icons (from icons/icon.svg) and iOS startup screens
 server.js          Express API: sign-in, users, courses and library, uploads, test generation jobs, attempts, grading, reports
 lib/parse.js       PDF, DOCX and text to headings and paragraphs (study material) or text lines (question papers)
 lib/sections.js    Headings and paragraphs to sections
