@@ -1,0 +1,8 @@
+node_modules/
+data/
+.env
+*.log
+# Reference question paper and the answers expected from it, used by test/jutroQuestionBank.test.js
+# (exam material, kept out of the repo)
+test/fixtures/jutro-question-bank.pdf
+test/fixtures/jutro-expected.json
