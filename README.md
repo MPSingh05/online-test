@@ -89,6 +89,50 @@ Installing needs the portal to be served over **https**. Browsers allow it on `h
 
 To publish it in **Google Play** or the **App Store**, wrap the deployed https site: for example with [PWABuilder](https://www.pwabuilder.com/), which packages a PWA for both stores. This needs a Google Play developer account, and an Apple developer account plus a Mac to build the iOS app.
 
+### Deploying to Google Cloud Run
+
+The `Dockerfile` builds a container that Cloud Run runs behind https. Data (documents, users, sessions, results) lives in a Cloud Storage bucket mounted at `/data`, and the passwords live in Secret Manager. `.gcloudignore` keeps `.env`, `data/` and the tests out of the upload.
+
+The app keeps sign-in codes and test-generation progress in memory, so run **one instance** (`--max-instances 1`) with the CPU always on while it runs (`--no-cpu-throttling`), so tests keep generating after the request that started them returns.
+
+One-time setup (replace `PROJECT` and the values in angle brackets):
+
+```bash
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com storage.googleapis.com --project PROJECT
+gcloud storage buckets create gs://PROJECT-data --project PROJECT --location asia-south1 --uniform-bucket-level-access --public-access-prevention
+gcloud iam service-accounts create portal-run --project PROJECT
+gcloud storage buckets add-iam-policy-binding gs://PROJECT-data --member serviceAccount:portal-run@PROJECT.iam.gserviceaccount.com --role roles/storage.objectUser
+printf '%s' '<admin password>'     | gcloud secrets create admin-password --project PROJECT --data-file=-
+printf '%s' '<gmail app password>' | gcloud secrets create smtp-pass --project PROJECT --data-file=-
+gcloud secrets add-iam-policy-binding admin-password --project PROJECT --member serviceAccount:portal-run@PROJECT.iam.gserviceaccount.com --role roles/secretmanager.secretAccessor
+gcloud secrets add-iam-policy-binding smtp-pass --project PROJECT --member serviceAccount:portal-run@PROJECT.iam.gserviceaccount.com --role roles/secretmanager.secretAccessor
+```
+
+Put the other settings in a file outside the repository, for example `cloudrun-env.yaml`:
+
+```yaml
+ADMIN_EMAIL: "<admin email>"
+APP_URL: "https://practice-test-portal-<project number>.asia-south1.run.app"
+DATA_DIR: "/data"
+SMTP_HOST: "smtp.gmail.com"
+SMTP_PORT: "587"
+SMTP_SECURE: "false"
+SMTP_USER: "<gmail address>"
+MAIL_FROM: "Practice Test Portal <gmail address>"
+```
+
+Deploy, and run the same command again to release each new version:
+
+```bash
+gcloud run deploy practice-test-portal --source . --project PROJECT --region asia-south1 \
+  --service-account portal-run@PROJECT.iam.gserviceaccount.com --allow-unauthenticated --execution-environment gen2 \
+  --add-volume name=data,type=cloud-storage,bucket=PROJECT-data --add-volume-mount volume=data,mount-path=/data \
+  --env-vars-file cloudrun-env.yaml --set-secrets ADMIN_PASSWORD=admin-password:latest,SMTP_PASS=smtp-pass:latest \
+  --max-instances 1 --min-instances 0 --no-cpu-throttling --cpu 1 --memory 1Gi --timeout 900
+```
+
+On Windows, run it from PowerShell (on one line, without the `\` continuations): Git Bash rewrites `/data` into a Windows path. Cloud Run limits a request to 32 MB, so upload large documents a few at a time. To use Claude for questions, store the key as a third secret and add `ANTHROPIC_API_KEY=anthropic-key:latest` to `--set-secrets`.
+
 ### Settings (`.env`)
 
 | Variable | Default | Purpose |

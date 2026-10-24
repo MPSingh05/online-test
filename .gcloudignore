@@ -1,0 +1,12 @@
+# Files never uploaded to Google Cloud Build by `gcloud run deploy --source .`
+.gcloudignore
+.git
+.gitignore
+# Local settings and secrets
+.env
+# Local data (documents, users, sessions, results)
+data/
+node_modules/
+# Tests and the exam material in test/fixtures
+test/
+*.log
