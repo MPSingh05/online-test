@@ -241,6 +241,12 @@ tbody tr:hover { background: var(--surface-2); }
 .timer { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; font-weight: 700; font-size: 1.15rem; padding: 6px 14px; border-radius: 999px; background: var(--surface-2); }
 .timer.warn { background: var(--warning-soft); color: var(--warning); }
 .timer.danger { background: var(--danger-soft); color: var(--danger); animation: pulse 1s ease-in-out infinite; }
+.timer.paused { background: var(--neutral-soft); color: var(--muted); }
+.timer.paused::after { content: "Paused"; font-size: 0.75rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
+.paused-panel { max-width: 560px; margin: 0 auto; padding: 36px 24px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.paused-panel .paused-icon { width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+.paused-panel .paused-icon svg { width: 28px; height: 28px; }
+.paused-panel p { max-width: 44ch; }
 @keyframes pulse { 50% { opacity: 0.65; } }
 @media (prefers-reduced-motion: reduce) { .timer.danger, .spinner { animation: none; } }
 .attempt-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
@@ -431,6 +437,10 @@ code { font-family: Consolas, "SFMono-Regular", Menlo, monospace; font-size: 0.8
   .action-bar .btn.large { min-height: 44px; padding: 8px 14px; font-size: 0.92rem; flex: none; }
   .header-user .who-text { display: none; }
   .eyebrow-extra { display: none; }
+  .attempt-bar .btn { padding: 8px 12px; }
+  .timer.paused::after { display: none; }
+  #pause-btn { min-width: 44px; padding: 8px; }
+  #pause-btn .btn-label { display: none; } /* icon only; the button keeps its aria-label */
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   .stat .value { font-size: 1.4rem; }
   .card { padding: 16px; }

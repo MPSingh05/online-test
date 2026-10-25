@@ -986,6 +986,7 @@ async function viewStart(ctx, testId) {
     <h2 style="margin-top:22px">Instructions</h2>
     <ul class="rules">
       <li>The timer starts when you press <strong>Start test</strong> and keeps running even if you leave the page. When it reaches zero, your answers are submitted automatically.</li>
+      <li>You can <strong>Pause</strong> the test at any time: the timer stops and the questions are hidden until you <strong>Resume</strong>, with the same time left. You can also resume later from My reports.</li>
       <li>Questions ending in <strong>(Select N answers)</strong> have more than one correct option. You score them only by selecting all of the correct options and nothing else.</li>
       <li>Every other question has exactly one correct option.</li>
       <li>There is no negative marking; unanswered questions score zero.</li>
@@ -1032,26 +1033,45 @@ async function viewStart(ctx, testId) {
 async function viewAttempt(ctx, attemptId) {
   const data = await api(`/api/attempts/${attemptId}`);
   if (!ctx.isActive()) return;
+  const backupKey = `opt.attempt.${attemptId}`;
   if (data.status === 'submitted') {
+    storage.remove(backupKey);
     location.replace(`#/result/${attemptId}`);
     return;
   }
 
   const questions = data.questions;
-  const backupKey = `opt.attempt.${attemptId}`;
   const backup = storage.get(backupKey, null);
   const s = {
     current: clampInt(backup?.current ?? 0, 0, questions.length - 1, 0),
     answers: backup?.answers ?? data.answers ?? {},
     marked: new Set(backup?.marked ?? []),
-    clockOffset: new Date(data.serverNow).getTime() - Date.now(),
-    deadline: new Date(data.deadline).getTime(),
+    clockOffset: 0,
+    deadline: 0,
+    pausedAt: null, // server time the test was paused, or null while it runs
+    busy: false, // a pause or resume request is on its way
     submitting: false,
     warned5: false,
     warned1: false,
   };
-  const remainingSec = () => (s.deadline - (Date.now() + s.clockOffset)) / 1000;
+  // Times come from the server, so a wrong clock on the device doesn't matter.
+  function applyTimer(timer) {
+    s.deadline = Date.parse(timer.deadline);
+    s.pausedAt = timer.pausedAt ? Date.parse(timer.pausedAt) : null;
+    s.clockOffset = Date.parse(timer.serverNow) - Date.now();
+  }
+  applyTimer(data);
+  const remainingSec = () => (s.deadline - (s.pausedAt ?? Date.now() + s.clockOffset)) / 1000;
+  // Warn only when the time crosses 5 and 1 minutes, not when a test opens (or resumes) with less left.
+  s.warned5 = remainingSec() <= 300;
+  s.warned1 = remainingSec() <= 60;
   const answeredCount = () => questions.filter((q) => s.answers[q.id]?.length).length;
+  // Reloads the attempt from the server: it was submitted, ran out of time, or was paused or resumed in
+  // another tab. Answers not yet saved stay in this browser's backup and are used again.
+  const reload = () => ctx.isActive() && router();
+
+  const pauseIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+  const playIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13a1 1 0 001.5.86l10.2-6.5a1 1 0 000-1.72L9.5 4.64A1 1 0 008 5.5z"/></svg>';
 
   app.innerHTML = `<div class="attempt">
     <div class="attempt-bar">
@@ -1060,9 +1080,11 @@ async function viewAttempt(ctx, attemptId) {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>
         <span id="timer-text">--:--</span>
       </div>
+      <button class="btn" type="button" id="pause-btn"></button>
       <button class="btn primary" type="button" id="submit-btn">Submit test</button>
     </div>
-    <div class="attempt-body">
+    <section class="card paused-panel" id="paused-panel" aria-labelledby="paused-title" hidden></section>
+    <div class="attempt-body" id="attempt-body">
       <article class="card" id="question-card"></article>
       <aside class="card palette-card" aria-label="Question navigator">
         <h2>Questions</h2>
@@ -1080,6 +1102,73 @@ async function viewAttempt(ctx, attemptId) {
   const palette = document.getElementById('palette');
   const timerEl = document.getElementById('timer');
   const timerText = document.getElementById('timer-text');
+  const pauseBtn = document.getElementById('pause-btn');
+  const pausedPanel = document.getElementById('paused-panel');
+  const attemptBody = document.getElementById('attempt-body');
+
+  // Paused: the timer is stopped and the questions are hidden until the test is resumed.
+  function renderPauseState() {
+    const paused = Boolean(s.pausedAt);
+    attemptBody.hidden = paused;
+    pausedPanel.hidden = !paused;
+    timerEl.classList.toggle('paused', paused);
+    timerEl.setAttribute('aria-label', paused ? 'Time remaining (paused)' : 'Time remaining');
+    pauseBtn.innerHTML = paused ? `${playIcon}<span class="btn-label">Resume</span>` : `${pauseIcon}<span class="btn-label">Pause</span>`;
+    pauseBtn.setAttribute('aria-label', paused ? 'Resume the test' : 'Pause the test');
+    pauseBtn.disabled = s.busy;
+    if (paused) {
+      pausedPanel.innerHTML = `
+        <div class="paused-icon" aria-hidden="true">${pauseIcon}</div>
+        <h2 id="paused-title">Test paused</h2>
+        <p>The timer is stopped with <strong>${esc(formatClock(remainingSec()))}</strong> left, and your answers are saved. The questions are hidden until you resume.</p>
+        <button class="btn primary large" type="button" data-action="resume"${s.busy ? ' disabled' : ''}>${playIcon} Resume test</button>
+        <p class="muted small">You can leave this page and resume later from <a href="#/reports">My reports</a>.</p>`;
+      pausedPanel.querySelector('[data-action="resume"]').onclick = resumeTest;
+    }
+  }
+
+  async function pauseTest() {
+    if (s.busy || s.submitting || s.pausedAt) return;
+    s.busy = true;
+    clearTimeout(saveTimer);
+    renderPauseState();
+    try {
+      applyTimer(await api(`/api/attempts/${attemptId}/pause`, { method: 'POST', body: { answers: s.answers } }));
+      if (!ctx.isActive()) return;
+      s.busy = false;
+      renderPauseState();
+      tick();
+      pausedPanel.querySelector('[data-action="resume"]').focus();
+    } catch (err) {
+      if (!ctx.isActive()) return;
+      s.busy = false;
+      if (err.status === 409) return reload();
+      renderPauseState();
+      toast(err.message, 5000);
+    }
+  }
+
+  async function resumeTest() {
+    if (s.busy || !s.pausedAt) return;
+    s.busy = true;
+    renderPauseState();
+    try {
+      applyTimer(await api(`/api/attempts/${attemptId}/resume`, { method: 'POST' }));
+      if (!ctx.isActive()) return;
+      s.busy = false;
+      renderPauseState();
+      render();
+      tick();
+      pauseBtn.focus();
+    } catch (err) {
+      if (!ctx.isActive()) return;
+      s.busy = false;
+      if (err.status === 409) return reload();
+      renderPauseState();
+      toast(err.message, 5000);
+    }
+  }
+  pauseBtn.onclick = () => (s.pausedAt ? resumeTest() : pauseTest());
 
   function renderQuestion() {
     const q = questions[s.current];
@@ -1152,15 +1241,13 @@ async function viewAttempt(ctx, attemptId) {
     saveTimer = setTimeout(syncAnswers, 800);
   }
   async function syncAnswers() {
+    if (s.pausedAt) return;
     try {
       await api(`/api/attempts/${attemptId}/answers`, { method: 'PUT', body: { answers: s.answers } });
     } catch (err) {
-      // 409: already submitted (time ran out or submitted in another tab). Other errors: the local
-      // copy is kept and the final submit sends every answer anyway.
-      if (err.status === 409 && ctx.isActive()) {
-        storage.remove(backupKey);
-        location.replace(`#/result/${attemptId}`);
-      }
+      // 409: submitted, out of time, or paused in another tab, so reload the attempt. Other errors: the
+      // local copy is kept and the final submit sends every answer anyway.
+      if (err.status === 409) reload();
     }
   }
 
@@ -1207,6 +1294,10 @@ async function viewAttempt(ctx, attemptId) {
   function tick() {
     const left = remainingSec();
     timerText.textContent = formatClock(left);
+    if (s.pausedAt) {
+      timerEl.classList.remove('warn', 'danger');
+      return;
+    }
     timerEl.classList.toggle('warn', left <= 300 && left > 60);
     timerEl.classList.toggle('danger', left <= 60);
     if (left <= 300 && left > 60 && !s.warned5) {
@@ -1264,6 +1355,11 @@ async function viewAttempt(ctx, attemptId) {
     } catch (err) {
       if (!ctx.isActive()) return;
       s.submitting = false;
+      // The test was paused in another tab while this one counted down: show it paused.
+      if (err.status === 409) {
+        closeModal();
+        return reload();
+      }
       openModal(
         `<h2 id="modal-title">Could not submit</h2><p style="margin-top:8px">${esc(err.message)}</p>
          <p class="muted small" style="margin-top:8px">Your answers are saved on this device. Check your connection and try again.</p>
@@ -1275,6 +1371,7 @@ async function viewAttempt(ctx, attemptId) {
   }
 
   render();
+  renderPauseState();
   tick();
 }
 
@@ -1510,11 +1607,11 @@ function reportRowHtml(a, own = true) {
   const courses = (a.courses ?? []).map((name) => `<span class="chip">${esc(name)}</span>`).join(' ');
   const title = `<td class="title-cell"><strong>${esc(a.title)}</strong>${courses ? ` ${courses}` : ''}<div class="muted small">${plural(a.questionCount, 'question')} · ${esc(a.documents.join(', '))}</div></td>`;
   if (a.status === 'in_progress') {
-    const leftSec = (new Date(a.deadline) - Date.now()) / 1000;
+    const leftSec = (a.remainingMs ?? new Date(a.deadline) - Date.now()) / 1000;
     return `<tr>
       <td data-label="Started">${esc(formatDate(a.startedAt))}</td>${title}
       <td class="num" data-label="Score">—</td>
-      <td data-label="Result"><span class="badge warn">In progress</span></td>
+      <td data-label="Result">${a.pausedAt ? '<span class="badge">Paused</span>' : '<span class="badge warn">In progress</span>'}</td>
       <td class="num" data-label="Time left">${formatDuration(leftSec)} left</td>
       <td>${own ? `<a class="btn small primary" href="#/attempt/${esc(a.attemptId)}">Resume</a>` : ''}</td></tr>`;
   }

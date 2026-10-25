@@ -16,6 +16,7 @@ import {
 } from './lib/generator/index.js';
 import { cleanAnswers, gradeAttempt, buildReview } from './lib/grading.js';
 import * as auth from './lib/auth.js';
+import * as clock from './lib/clock.js';
 import { mailConfigured, sendMail, verifyMail, inviteEmail, codeEmail } from './lib/mailer.js';
 import {
   GENDERS,
@@ -198,7 +199,16 @@ const testSummary = (test) => ({
   warnings: test.warnings,
 });
 
-const isExpired = (attempt) => Date.now() > new Date(attempt.deadline).getTime() + SUBMIT_GRACE_MS;
+const isExpired = (attempt) => clock.isExpired(attempt, SUBMIT_GRACE_MS);
+
+// What the browser needs to show the timer: the deadline, whether it is paused, and the server's time
+// (so a wrong clock on the device doesn't matter).
+const timerState = (attempt) => ({
+  deadline: attempt.deadline,
+  pausedAt: attempt.pausedAt ?? null,
+  remainingMs: Math.max(0, clock.remainingMs(attempt)),
+  serverNow: new Date().toISOString(),
+});
 
 // Admins may view anyone's attempt; only its owner may answer or submit it.
 async function loadAttempt(id, user, { write = false } = {}) {
@@ -212,6 +222,7 @@ async function loadAttempt(id, user, { write = false } = {}) {
 }
 
 async function finalize(test, attempt, answers, { auto = false } = {}) {
+  clock.resume(attempt); // submitting a paused test stops the clock where it was
   attempt.answers = cleanAnswers(test, answers);
   attempt.status = 'submitted';
   attempt.autoSubmitted = auto;
@@ -733,28 +744,60 @@ app.get('/api/attempts/:id', async (req, res) => {
     test: { id: test.id, title: test.title, config: test.config },
     user: attempt.user,
     startedAt: attempt.startedAt,
-    deadline: attempt.deadline,
-    serverNow: new Date().toISOString(),
+    ...timerState(attempt),
     answers: attempt.answers,
     questions: test.questions.map(publicQuestion),
   });
 });
 
-app.put('/api/attempts/:id/answers', async (req, res) => {
+// Loads an attempt that is still running, for the routes that change it. 409 tells the browser to reload
+// the attempt: it has been submitted, or its time ran out (and it has now been submitted).
+async function loadOpenAttempt(req) {
   const { attempt, test } = await loadAttempt(req.params.id, req.user, { write: true });
   if (attempt.status !== 'in_progress') throw new HttpError(409, 'This test has already been submitted.');
   if (isExpired(attempt)) {
     await finalizeIfExpired(test, attempt);
     throw new HttpError(409, 'Time is up. The test was submitted automatically.');
   }
+  return { attempt, test };
+}
+
+app.put('/api/attempts/:id/answers', async (req, res) => {
+  const { attempt, test } = await loadOpenAttempt(req);
+  if (clock.isPaused(attempt)) throw new HttpError(409, 'This test is paused. Resume it to continue.');
   attempt.answers = cleanAnswers(test, req.body?.answers);
   await store.put('attempts', attempt);
   res.json({ ok: true });
 });
 
+// Pausing stops the timer (and saves the answers sent with it); resuming starts it again with the same
+// time left. A paused test is never submitted for running out of time.
+app.post('/api/attempts/:id/pause', async (req, res) => {
+  const { attempt, test } = await loadOpenAttempt(req);
+  if (!clock.isPaused(attempt)) {
+    if (clock.remainingMs(attempt) <= 0) throw new HttpError(409, 'Time is up, so the test can no longer be paused.');
+    if (req.body?.answers) attempt.answers = cleanAnswers(test, req.body.answers);
+    clock.pause(attempt);
+    await store.put('attempts', attempt);
+  }
+  res.json(timerState(attempt));
+});
+
+app.post('/api/attempts/:id/resume', async (req, res) => {
+  const { attempt } = await loadOpenAttempt(req);
+  if (clock.isPaused(attempt)) {
+    clock.resume(attempt);
+    await store.put('attempts', attempt);
+  }
+  res.json(timerState(attempt));
+});
+
 app.post('/api/attempts/:id/submit', async (req, res) => {
   const { attempt, test } = await loadAttempt(req.params.id, req.user, { write: true });
   if (attempt.status === 'in_progress') {
+    // The browser auto-submits when its timer reaches zero; if the test was paused meanwhile (in another
+    // tab, say), its time hasn't run out, so that auto-submit is refused.
+    if (req.body?.auto && clock.isPaused(attempt)) throw new HttpError(409, 'This test is paused. Resume it to continue.');
     if (isExpired(attempt)) await finalizeIfExpired(test, attempt);
     else await finalize(test, attempt, req.body?.answers ?? attempt.answers, { auto: Boolean(req.body?.auto) });
   }
@@ -787,6 +830,8 @@ app.get('/api/reports', async (req, res) => {
       status: attempt.status,
       startedAt: attempt.startedAt,
       deadline: attempt.deadline,
+      pausedAt: attempt.pausedAt ?? null,
+      remainingMs: attempt.status === 'in_progress' ? Math.max(0, clock.remainingMs(attempt)) : null,
       submittedAt: attempt.submittedAt ?? null,
       autoSubmitted: attempt.autoSubmitted ?? false,
       result: attempt.result ?? null,
